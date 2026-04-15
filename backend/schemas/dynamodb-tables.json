@@ -1,0 +1,173 @@
+{
+  "Tables": [
+    {
+      "TableName": "Products",
+      "Comment": "Main product catalog table",
+      "KeySchema": [
+        { "AttributeName": "product_id", "KeyType": "HASH" }
+      ],
+      "AttributeDefinitions": [
+        { "AttributeName": "product_id", "AttributeType": "S" },
+        { "AttributeName": "category", "AttributeType": "S" },
+        { "AttributeName": "vendor_id", "AttributeType": "S" },
+        { "AttributeName": "popularity_score", "AttributeType": "N" },
+        { "AttributeName": "price", "AttributeType": "N" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "CategoryPopularityIndex",
+          "KeySchema": [
+            { "AttributeName": "category", "KeyType": "HASH" },
+            { "AttributeName": "popularity_score", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        },
+        {
+          "IndexName": "VendorPriceIndex",
+          "KeySchema": [
+            { "AttributeName": "vendor_id", "KeyType": "HASH" },
+            { "AttributeName": "price", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "SampleItem": {
+        "product_id": "PROD-001",
+        "product_name": "Wireless Noise-Cancelling Headphones",
+        "category": "Electronics",
+        "price": 149.99,
+        "vendor_id": "VENDOR-007",
+        "sales_count": 1240,
+        "popularity_score": 87,
+        "description": "Premium sound quality with 30hr battery life",
+        "image_url": "https://example.com/images/headphones.jpg",
+        "stock": 85,
+        "tags": ["audio", "wireless", "noise-cancelling"],
+        "created_at": "2024-01-15T08:00:00Z",
+        "updated_at": "2024-06-20T14:30:00Z"
+      }
+    },
+    {
+      "TableName": "UserEvents",
+      "Comment": "Tracks user activity: views, cart-adds, purchases",
+      "KeySchema": [
+        { "AttributeName": "user_id", "KeyType": "HASH" },
+        { "AttributeName": "event_id", "KeyType": "RANGE" }
+      ],
+      "AttributeDefinitions": [
+        { "AttributeName": "user_id", "AttributeType": "S" },
+        { "AttributeName": "event_id", "AttributeType": "S" },
+        { "AttributeName": "product_id", "AttributeType": "S" },
+        { "AttributeName": "timestamp", "AttributeType": "S" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "ProductEventsIndex",
+          "KeySchema": [
+            { "AttributeName": "product_id", "KeyType": "HASH" },
+            { "AttributeName": "timestamp", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "TimeToLiveSpecification": {
+        "AttributeName": "ttl",
+        "Enabled": true
+      },
+      "SampleItem": {
+        "user_id": "USER-001",
+        "event_id": "EVT-20240615-001",
+        "product_id": "PROD-001",
+        "event_type": "view",
+        "timestamp": "2024-06-15T10:23:45Z",
+        "session_id": "SESSION-ABC123",
+        "ttl": 1750000000
+      }
+    },
+    {
+      "TableName": "RecommendationCache",
+      "Comment": "Stores precomputed recommendations for fast retrieval",
+      "KeySchema": [
+        { "AttributeName": "cache_key", "KeyType": "HASH" },
+        { "AttributeName": "strategy", "KeyType": "RANGE" }
+      ],
+      "AttributeDefinitions": [
+        { "AttributeName": "cache_key", "AttributeType": "S" },
+        { "AttributeName": "strategy", "AttributeType": "S" }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "TimeToLiveSpecification": {
+        "AttributeName": "ttl",
+        "Enabled": true
+      },
+      "SampleItem": {
+        "cache_key": "PRODUCT#PROD-001",
+        "strategy": "frequently_bought_together",
+        "recommendations": [
+          {
+            "product_id": "PROD-002",
+            "score": 0.92,
+            "reason": "Frequently bought together"
+          }
+        ],
+        "computed_at": "2024-06-15T00:00:00Z",
+        "ttl": 1718582400
+      }
+    },
+    {
+      "TableName": "CoOccurrenceMatrix",
+      "Comment": "Stores product co-purchase / co-view counts for collaborative filtering",
+      "KeySchema": [
+        { "AttributeName": "product_a", "KeyType": "HASH" },
+        { "AttributeName": "product_b", "KeyType": "RANGE" }
+      ],
+      "AttributeDefinitions": [
+        { "AttributeName": "product_a", "AttributeType": "S" },
+        { "AttributeName": "product_b", "AttributeType": "S" }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "SampleItem": {
+        "product_a": "PROD-001",
+        "product_b": "PROD-002",
+        "co_purchase_count": 342,
+        "co_view_count": 1850,
+        "last_updated": "2024-06-15T00:00:00Z"
+      }
+    },
+    {
+      "TableName": "ABTestLogs",
+      "Comment": "Logs impressions and clicks for A/B testing recommendation strategies",
+      "KeySchema": [
+        { "AttributeName": "log_id", "KeyType": "HASH" }
+      ],
+      "AttributeDefinitions": [
+        { "AttributeName": "log_id", "AttributeType": "S" },
+        { "AttributeName": "experiment_id", "AttributeType": "S" },
+        { "AttributeName": "timestamp", "AttributeType": "S" }
+      ],
+      "GlobalSecondaryIndexes": [
+        {
+          "IndexName": "ExperimentIndex",
+          "KeySchema": [
+            { "AttributeName": "experiment_id", "KeyType": "HASH" },
+            { "AttributeName": "timestamp", "KeyType": "RANGE" }
+          ],
+          "Projection": { "ProjectionType": "ALL" }
+        }
+      ],
+      "BillingMode": "PAY_PER_REQUEST",
+      "SampleItem": {
+        "log_id": "LOG-20240615-001",
+        "experiment_id": "EXP-001",
+        "variant": "advanced",
+        "event_type": "impression",
+        "user_id": "USER-001",
+        "product_id": "PROD-003",
+        "timestamp": "2024-06-15T10:25:00Z",
+        "session_id": "SESSION-ABC123"
+      }
+    }
+  ]
+}

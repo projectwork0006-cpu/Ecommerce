@@ -1,0 +1,444 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  E-Commerce Product Search & Recommendation System
+  Full-stack: API Gateway + Lambda + DynamoDB + EventBridge + SNS + Cognito
+
+###############################################################################
+# GLOBAL DEFAULTS
+###############################################################################
+Globals:
+  Function:
+    Runtime: nodejs18.x
+    Timeout: 30
+    MemorySize: 512
+    Environment:
+      Variables:
+        PRODUCTS_TABLE:    !Ref ProductsTable
+        EVENTS_TABLE:      !Ref UserEventsTable
+        CACHE_TABLE:       !Ref RecommendationCacheTable
+        CO_OCCUR_TABLE:    !Ref CoOccurrenceTable
+        AB_LOGS_TABLE:     !Ref ABTestLogsTable
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: "1"
+    Tracing: Active
+
+###############################################################################
+# PARAMETERS
+###############################################################################
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  AlertEmail:
+    Type: String
+    Description: Email address for CloudWatch alarm notifications
+    Default: devops@example.com
+
+###############################################################################
+# RESOURCES
+###############################################################################
+Resources:
+
+  # ─── Cognito User Pool ────────────────────────────────────────────────────
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "ecommerce-users-${Environment}"
+      AutoVerifiedAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: false
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "ecommerce-app-${Environment}"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+
+  # ─── DynamoDB Tables ──────────────────────────────────────────────────────
+  ProductsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "Products-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: product_id
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: product_id
+          AttributeType: S
+        - AttributeName: category
+          AttributeType: S
+        - AttributeName: vendor_id
+          AttributeType: S
+        - AttributeName: popularity_score
+          AttributeType: N
+        - AttributeName: price
+          AttributeType: N
+      GlobalSecondaryIndexes:
+        - IndexName: CategoryPopularityIndex
+          KeySchema:
+            - AttributeName: category
+              KeyType: HASH
+            - AttributeName: popularity_score
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: VendorPriceIndex
+          KeySchema:
+            - AttributeName: vendor_id
+              KeyType: HASH
+            - AttributeName: price
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  UserEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "UserEvents-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: event_id
+          KeyType: RANGE
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: event_id
+          AttributeType: S
+        - AttributeName: product_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      GlobalSecondaryIndexes:
+        - IndexName: ProductEventsIndex
+          KeySchema:
+            - AttributeName: product_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  RecommendationCacheTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "RecommendationCache-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: cache_key
+          KeyType: HASH
+        - AttributeName: strategy
+          KeyType: RANGE
+      AttributeDefinitions:
+        - AttributeName: cache_key
+          AttributeType: S
+        - AttributeName: strategy
+          AttributeType: S
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  CoOccurrenceTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "CoOccurrenceMatrix-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: product_a
+          KeyType: HASH
+        - AttributeName: product_b
+          KeyType: RANGE
+      AttributeDefinitions:
+        - AttributeName: product_a
+          AttributeType: S
+        - AttributeName: product_b
+          AttributeType: S
+
+  ABTestLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "ABTestLogs-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: log_id
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: log_id
+          AttributeType: S
+        - AttributeName: experiment_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      GlobalSecondaryIndexes:
+        - IndexName: ExperimentIndex
+          KeySchema:
+            - AttributeName: experiment_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # ─── Lambda IAM Role ──────────────────────────────────────────────────────
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ecommerce-lambda-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt ProductsTable.Arn
+                  - !Sub "${ProductsTable.Arn}/index/*"
+                  - !GetAtt UserEventsTable.Arn
+                  - !Sub "${UserEventsTable.Arn}/index/*"
+                  - !GetAtt RecommendationCacheTable.Arn
+                  - !GetAtt CoOccurrenceTable.Arn
+                  - !GetAtt ABTestLogsTable.Arn
+                  - !Sub "${ABTestLogsTable.Arn}/index/*"
+
+  # ─── Lambda Functions ─────────────────────────────────────────────────────
+  SearchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "ecommerce-search-${Environment}"
+      CodeUri: backend/lambdas/search/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        SearchApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /search
+            Method: GET
+
+  RecommendationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "ecommerce-recommendations-${Environment}"
+      CodeUri: backend/lambdas/recommendations/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        RecommendApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /recommendations
+            Method: GET
+
+  ActivityTrackerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "ecommerce-activity-tracker-${Environment}"
+      CodeUri: backend/lambdas/activity-tracker/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        EventsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /events
+            Method: POST
+
+  ABTestingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "ecommerce-ab-testing-${Environment}"
+      CodeUri: backend/lambdas/ab-testing/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        ABClickApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /ab/click
+            Method: POST
+        ABMetricsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /ab/metrics
+            Method: GET
+
+  CacheUpdaterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "ecommerce-cache-updater-${Environment}"
+      CodeUri: backend/lambdas/cache-updater/
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          CACHE_TTL_HOURS: "6"
+      Events:
+        ScheduledUpdate:
+          Type: Schedule
+          Properties:
+            Schedule: rate(6 hours)
+            Name: !Sub "cache-updater-schedule-${Environment}"
+            Description: Refresh recommendation cache every 6 hours
+
+  # ─── API Gateway ──────────────────────────────────────────────────────────
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "ecommerce-api-${Environment}"
+      StageName: !Ref Environment
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+        AddDefaultAuthorizerToCorsPreflight: false
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      GatewayResponses:
+        DEFAULT_4XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+        DEFAULT_5XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+
+  # ─── SNS Alert Topic ──────────────────────────────────────────────────────
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "ecommerce-alerts-${Environment}"
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  # ─── CloudWatch Alarms ────────────────────────────────────────────────────
+  SearchFunctionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "SearchFunctionErrors-${Environment}"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref SearchFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlertTopic
+
+  RecommendationErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "RecommendationErrors-${Environment}"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref RecommendationFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlertTopic
+
+  SearchLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "SearchHighLatency-${Environment}"
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref SearchFunction
+      Statistic: p95
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlertTopic
+
+###############################################################################
+# OUTPUTS
+###############################################################################
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiEndpoint"
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolId"
+
+  UserPoolClientId:
+    Description: Cognito App Client ID
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolClientId"
+
+  ProductsTableName:
+    Description: Products DynamoDB table name
+    Value: !Ref ProductsTable
+
+  AlertTopicArn:
+    Description: SNS topic ARN for alerts
+    Value: !Ref AlertTopic
